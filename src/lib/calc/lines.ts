@@ -152,10 +152,15 @@ export function calcReceipt(cfg: ReceiptConfig, env: ReceiptEnv): ReceiptCalc {
     return `${fmtQty(Qi.per[t.id])} ${l.unit}`;
   };
 
-  /** Делит общую сумму: по долям / поровну; пустующая часть — на вас (галочка). */
+  /**
+   * Делит общую сумму: по долям (доля того, кто платит сам, — на вас) или поровну между теми, кто платит;
+   * пустующая часть — на вас (галочка). Делить не на кого — вся сумма на вас.
+   */
   function splitCommon(mode: 'shares' | 'equal', total: number) {
     if (mode === 'equal') {
-      const n = T.length + (vacOn ? 1 : 0), parts = splitKop(total, [...T.map(() => 1), vacOn ? 1 : 0]);
+      const w = [...T.map((t) => (off.has(t.id) ? 0 : 1)), vacOn ? 1 : 0], n = sumOf(w);
+      if (!n) return { parts: w, mine: total, how: () => '' };
+      const parts = splitKop(total, w);
       return { parts, mine: vacOn ? parts[parts.length - 1] : 0, how: () => `÷ ${n}` + (vacOn ? ' (одна часть пустует)' : '') };
     }
     const parts = splitKop(total, [...T.map((t) => t.share), vacOn ? vacant : 0]);

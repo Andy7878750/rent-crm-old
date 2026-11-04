@@ -578,7 +578,7 @@ function Formula({ C, pcfg, cfg, tenants, newR }: { C: ReturnType<typeof calcRec
     cols.push({ lab: lab + head, ex: exQ, v: (t) => (Qi.miss.length || Qi.cfgMiss ? '…' : rub ? fmtMoney(Qi.Q) + ' ₽' : fmtQty(Qi.ind ? Qi.per[t.id] : Qi.Q)) });
     if (!rub) { cols.push({ op: '×' }); cols.push({ lab: pr.fromSum ? 'Тариф = сумма ÷ объём' : 'Тариф, ₽', ex: exT, v: () => (pr.miss.length ? '…' : fmtPrice(pr.p)) }); }
     if (!Qi.ind) {
-      if (cfg.pay.mode === 'equal') { cols.push({ op: '÷' }); cols.push({ lab: 'Частей', v: () => String(tenants.length + (vacOn ? 1 : 0)) }); }
+      if (cfg.pay.mode === 'equal') { cols.push({ op: '÷' }); cols.push({ lab: 'Частей', v: () => String(tenants.filter((t) => !off.includes(t.id)).length + (vacOn ? 1 : 0)) }); }
       else { cols.push({ op: '×' }); cols.push({ lab: 'Доля', v: (t) => pct(effShare(t)) }); }
     }
     if (exQ || exT) anyEx = true;

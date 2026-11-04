@@ -118,6 +118,17 @@ test('кто платит сам: в счёт не идёт, его доля о�
 });
 const of2 = (r: ReturnType<typeof calculateMonth>, tid: string, sid: string) => sumMoney(r.tenants[tid].lines.filter((l) => l.serviceId === sid).map((l) => l.amount ?? NaN));
 
+test('«поровну» — только между теми, кто платит: мусор у одного арендатора целиком на нём', () => {
+  const input: MonthInput = structuredClone(sept);
+  input.services = input.services.map((s) => (s.id === 'c2' ? { ...s, config: { ...s.config!, pay: { ...s.config!.pay, off: ['V'] } } } : s));
+  const r = calculateMonth(input);
+  assert.equal(of2(r, 'W', 'c2'), 600);
+  assert.equal(r.owner.k61.lines.some((l) => l.serviceId === 'c2'), false);
+  // Никто не платит — вся сумма на вас.
+  input.services = input.services.map((s) => (s.id === 'c2' ? { ...s, config: { ...s.config!, pay: { ...s.config!.pay, off: ['V', 'W'] } } } : s));
+  assert.equal(calculateMonth(input).owner.k61.lines.find((l) => l.serviceId === 'c2')?.amount, 600);
+});
+
 test('коэффициент: каждая строка × 1,06 до копеек', () => {
   const input: MonthInput = structuredClone(sept);
   input.services = input.services.map((s) => (s.id === 'c9' ? { ...s, config: { ...s.config!, coef: 1.06 } } : s));
@@ -147,6 +158,15 @@ test('месячные поля рамки и главная сумма квит
   const c9 = services.find((s) => s.id === 'c9')!.config!;
   assert.deepEqual(monthFields(c9).map((f) => f.key), ['L3:v']);
   assert.equal(c9.billKey, 'L3:v');
+});
+
+test('старая квитанция «от других услуг» берёт расход и из квитанций из строк', () => {
+  const input: MonthInput = structuredClone(sept);
+  input.services.push({ id: 'old-dr', objectId: 'k61', supplier: 'Водоканал', name: 'Водоотведение (старое)', unit: 'м³', kind: 'indiv',
+    tariffs: [{ logic: 'derived', price: 45, sources: ['c6', 'c7'], who: 'all', from: '2026-01-01' }] });
+  const r = calculateMonth(input);
+  assert.equal(r.tenants.V.lines.find((l) => l.serviceId === 'old-dr')?.amount, 270); // (3 + 3) м³ × 45
+  assert.equal(r.tenants.W.lines.find((l) => l.serviceId === 'old-dr')?.amount, 90);
 });
 
 test('объект собственника без арендаторов: вся квитанция на вас', () => {

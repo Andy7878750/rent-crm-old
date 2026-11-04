@@ -183,6 +183,11 @@ function calcTenant(ctx: Ctx, tenant: Tenant): TenantBill {
       use[s.id] = d === null || n === null ? null : d + n;
     }
   }
+  // Квитанции из строк тоже могут быть источником расхода для старых «от других услуг»: расход по их счётчику в м³.
+  for (const s of input.services) {
+    if (!s.config || !ctx.rc.has(s.id) || !meterUnits(s).includes('м³')) continue;
+    use[s.id] = s.config.pay.off.includes(tenant.id) ? 0 : sourceUsage(input, s.id, tenant.id, 'м³') ?? null;
+  }
 
   const line = (s: Service, tr: Tariff, label: string, formula: string, raw: number | null, note?: string, group?: LineGroup) => {
     const g: LineGroup = group ?? (tr.logic === 'fixed' ? 'fixed' : s.kind === 'common' ? 'common' : 'indiv');

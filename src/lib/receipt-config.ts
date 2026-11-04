@@ -70,7 +70,8 @@ export function fromLegacy(s: Service, tenants: Tenant[], month: string): Receip
     case 'meterRest':
       lines = [blankLine('', { unit, q: { src: 'each', read: 'diff' }, t: { mode: 'set', p: tr.price } })];
       if (tr.norm !== undefined && tr.normPrice !== undefined) {
-        lines.push(blankLine('L2', { name: (tr.extraName || 'подогрев').toLowerCase(), unit: 'Гкал', q: { src: 'norm', k: tr.norm, ref: '' }, t: { mode: 'set', p: tr.normPrice } }));
+        lines[0].name = unit === 'м³' ? 'вода' : 'расход';
+        lines.push(blankLine('L2', { name: tr.extraName || 'подогрев', unit: 'Гкал', q: { src: 'norm', k: tr.norm, ref: '' }, t: { mode: 'set', p: tr.normPrice } }));
       }
       pay.rest = 'shares'; pay.base = 'total';
       break;
