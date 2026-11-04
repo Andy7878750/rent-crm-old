@@ -7,6 +7,7 @@ import type {
   Reading, Service, Tariff, Tenant, TenantBill,
 } from './types.ts';
 import { fmtMoney, fmtPrice, fmtQty, round2, sumMoney } from './format.ts';
+import { calcReceipt, coefOf, isRub, lineLabel, usageOf, type ReceiptCalc, type ReceiptEnv } from './lines.ts';
 
 /** Действующий тариф услуги для арендатора (или собственника своего объекта) на месяц. «Все» — все без исключения. */
 export function activeTariff(service: Service, tenantId: string, month: string): Tariff | null {
@@ -33,10 +34,83 @@ function readingUsage(r: Reading | undefined): { usage: number | null; negative:
 interface Ctx {
   input: MonthInput;
   obj: PropertyObject;
+  /** Расчёт квитанций из строк этого объекта: serviceId → результат. */
+  rc: Map<string, ReceiptCalc>;
 }
 
 /** Квитанция объекта относится только к своему объекту; старые услуги аккаунта — к любому. */
 const onObject = (s: Service, obj: PropertyObject) => !s.objectId || s.objectId === obj.id;
+
+/** Ключ показаний строки квитанции: первая строка — как у старых квитанций, остальные — зона = ключ строки. */
+export const lineKey = (serviceId: string, lineId: string) => (lineId ? `${serviceId}:${lineId}` : serviceId);
+
+/** Данные месяца для квитанции из строк. */
+function receiptEnv(input: MonthInput, obj: PropertyObject, s: Service): ReceiptEnv {
+  const cfg = s.config!;
+  return {
+    tenants: obj.tenants,
+    value: (k) => (k === cfg.billKey ? input.bills[obj.id]?.[s.id] : input.values?.[obj.id]?.[s.id]?.[k]),
+    reading: (tid, l) => input.readings[tid]?.[lineKey(s.id, l.id)],
+    source: (id, tid, unit) => sourceUsage(input, id, tid, unit),
+    sourceName: (id) => input.services.find((x) => x.id === id)?.name ?? '?',
+  };
+}
+
+/** Расчёт одной квитанции из строк на объекте (для рамки на странице объекта). */
+export function receiptCalcOf(input: MonthInput, obj: PropertyObject, s: Service): ReceiptCalc | null {
+  return s.config ? calcReceipt(s.config, receiptEnv(input, obj, s)) : null;
+}
+
+/** Единицы, в которых у квитанции есть счётчики арендаторов (для «суммы других счётчиков»). */
+export function meterUnits(s: Service): string[] {
+  if (s.config) return [...new Set(s.config.lines.filter((l) => l.q.src === 'each').map((l) => l.unit))];
+  return s.tariffs.some((t) => ['meter', 'meterRest', 'split', 'dn'].includes(t.logic)) && s.unit ? [s.unit] : [];
+}
+
+/** Расход арендатора по квитанции-источнику в единице unit; undefined — у источника нет такого счётчика. */
+export function sourceUsage(input: MonthInput, id: string, tid: string, unit: string): number | null | undefined {
+  const src = input.services.find((x) => x.id === id);
+  if (!src || !meterUnits(src).includes(unit)) return undefined;
+  const rd = input.readings[tid] || {};
+  if (src.config) {
+    const sl = src.config.lines.find((l) => l.q.src === 'each' && l.unit === unit)!;
+    return usageOf(sl.q.read, rd[lineKey(id, sl.id)]);
+  }
+  // Старая квитанция по счётчику: расход арендатора (день + ночь); нет тарифа у арендатора — 0.
+  const tr = activeTariff(src, tid, input.month);
+  if (!tr) return 0;
+  if (tr.logic === 'dn') {
+    const d = readingUsage(rd[id + ':day']).usage, n = readingUsage(rd[id + ':night']).usage;
+    return d === null || n === null ? null : d + n;
+  }
+  return readingUsage(rd[id]).usage;
+}
+
+/** Строки счёта, счётчики и пропуски арендатора по квитанции из строк. false — арендатор платит сам. */
+function configTenant(ctx: Ctx, s: Service, tenant: Tenant, lines: BillLine[], meters: MeterUse[], missing: string[]): boolean {
+  const cfg = s.config!, C = ctx.rc.get(s.id)!;
+  if ((cfg.pay.off ?? []).includes(tenant.id)) return false;
+  const rd = ctx.input.readings[tenant.id] || {};
+  cfg.lines.forEach((l, i) => {
+    if (l.q.src !== 'each') return;
+    const r = rd[lineKey(s.id, l.id)], lab = lineLabel(cfg, l, i);
+    const raw = l.q.read === 'direct' ? (r?.usage ?? null) : r?.cur == null ? null : r.cur - (r.prev ?? 0);
+    meters.push({ serviceId: s.id, label: lab ? `${s.name} — ${lab}` : s.name, unit: l.unit, prev: r?.prev, cur: r?.cur,
+      usage: usageOf(l.q.read, r), negative: raw !== null && raw < 0 });
+  });
+  if (!C.ready) {
+    missing.push(`${s.name}: ${C.cfg.length ? 'не настроено — ' + C.cfg.join('; ') : 'ждём ' + C.miss.join(', ')}`);
+    lines.push({ serviceId: s.id, group: 'common', label: s.name, formula: '—', amount: null });
+    return true;
+  }
+  const k = coefOf(cfg), kk = k !== 1 ? ` × ${fmtQty(k)}` : '';
+  for (const x of C.per[tenant.id] ?? []) {
+    const L = C.lines.find((y) => y.l.id === x.line);
+    const group: LineGroup = x.rest || !L ? 'common' : L.Qi.ind ? 'indiv' : L.l.q.src === 'const' && isRub(L.l) ? 'fixed' : 'common';
+    lines.push({ serviceId: s.id, group, label: x.lab ? `${s.name}: ${x.lab}` : s.name, formula: `${x.sign < 0 ? '− ' : ''}${x.how}${kk}`, amount: round2(x.sum * k) });
+  }
+  return true;
+}
 
 /** Расход арендатора по услуге (для день/ночь — сумма зон). */
 function tenantUsage(ctx: Ctx, tenantId: string, service: Service, tariff: Tariff): number | null {
@@ -83,10 +157,12 @@ function calcTenant(ctx: Ctx, tenant: Tenant): TenantBill {
 
   const pairs: Array<[Service, Tariff]> = [];
   for (const s of input.services) {
-    if (s.kind === 'owner' || !onObject(s, obj)) continue;
+    if (s.config || s.kind === 'owner' || !onObject(s, obj)) continue;
     const tr = activeTariff(s, tenant.id, input.month);
     if (tr) pairs.push([s, tr]);
   }
+  const tariffOf = new Map(pairs.map(([s, tr]) => [s.id, tr]));
+  let configCount = 0;
 
   // 1. Счётчики: расход каждой услуги (нужен и для производных услуг).
   const use: Record<string, number | null> = {};
@@ -115,7 +191,13 @@ function calcTenant(ctx: Ctx, tenant: Tenant): TenantBill {
   const q = (u: number | null) => (u === null ? '—' : fmtQty(u));
 
   // 2. Строки счёта в порядке услуг.
-  for (const [s, tr] of pairs) {
+  for (const s of input.services) {
+    if (s.config) {
+      if (ctx.rc.has(s.id) && configTenant(ctx, s, tenant, lines, meters, missing)) configCount++;
+      continue;
+    }
+    const tr = tariffOf.get(s.id);
+    if (!tr) continue;
     const p = tr.price ?? null;
     switch (tr.logic) {
       case 'meter': {
@@ -198,7 +280,7 @@ function calcTenant(ctx: Ctx, tenant: Tenant): TenantBill {
   }
 
   const total = sumMoney(lines.filter((l) => l.amount !== null).map((l) => l.amount as number));
-  return { tenantId: tenant.id, objectId: obj.id, lines, meters, total, missing, serviceCount: pairs.length };
+  return { tenantId: tenant.id, objectId: obj.id, lines, meters, total, missing, serviceCount: pairs.length + configCount };
 }
 
 /** Что остаётся на арендодателе: незанятая доля по «доле», незанятая доля остатка, услуги «только арендодатель». */
@@ -208,6 +290,13 @@ function calcOwner(ctx: Ctx): { lines: OwnerLine[]; total: number } {
   const lines: OwnerLine[] = [];
   for (const s of input.services) {
     if (!onObject(s, obj)) continue;
+    if (s.config) {
+      const C = ctx.rc.get(s.id);
+      if (!C) continue;
+      const nobody = obj.tenants.every((t) => (s.config!.pay.off ?? []).includes(t.id));
+      if (C.ready ? C.mine !== 0 : nobody) lines.push({ serviceId: s.id, label: `${s.name} — на вас`, amount: C.ready ? C.mine : null });
+      continue;
+    }
     const bill = bills[s.id];
     if (s.kind === 'owner') {
       if (bill !== undefined) lines.push({ serviceId: s.id, label: s.name, amount: round2(bill) });
@@ -234,7 +323,9 @@ function calcOwner(ctx: Ctx): { lines: OwnerLine[]; total: number } {
 export function calculateMonth(input: MonthInput): MonthResult {
   const result: MonthResult = { tenants: {}, owner: {} };
   for (const obj of input.objects) {
-    const ctx: Ctx = { input, obj };
+    const rc = new Map<string, ReceiptCalc>();
+    for (const s of input.services) if (s.config && onObject(s, obj)) rc.set(s.id, calcReceipt(s.config, receiptEnv(input, obj, s)));
+    const ctx: Ctx = { input, obj, rc };
     for (const t of obj.tenants) result.tenants[t.id] = calcTenant(ctx, t);
     result.owner[obj.id] = calcOwner(ctx);
   }

@@ -35,6 +35,7 @@ export async function loadServices(accountId: string): Promise<CalcService[]> {
   const links = trs.length ? await db.select().from(schema.tariffTenants).where(inArray(schema.tariffTenants.tariffId, trs.map((t) => t.id))) : [];
   return svcs.map((s) => ({
     id: s.id, objectId: s.objectId ?? undefined, category: s.category, supplier: s.supplier, name: s.name, unit: s.unit, kind: s.kind,
+    config: s.config ?? undefined,
     tariffs: trs.filter((t) => t.serviceId === s.id).map((t): CalcTariff => ({
       logic: t.logic, price: num(t.price), price2: num(t.price2), norm: num(t.norm), normPrice: num(t.normPrice),
       extraName: t.extraName || undefined, sources: t.sources,
@@ -55,8 +56,13 @@ export async function loadMonthInput(accountId: string, month: string): Promise<
   const reads = tenIds.length ? await db.select().from(schema.readings)
     .where(and(inArray(schema.readings.tenantId, tenIds), eq(schema.readings.month, month))) : [];
 
+  const vals = objIds.length ? await db.select().from(schema.receiptValues)
+    .where(and(inArray(schema.receiptValues.objectId, objIds), eq(schema.receiptValues.month, month))) : [];
+
   const billMap: MonthInput['bills'] = {};
   for (const b of bills) (billMap[b.objectId] ??= {})[b.serviceId] = Number(b.amount);
+  const valMap: NonNullable<MonthInput['values']> = {};
+  for (const v of vals) ((valMap[v.objectId] ??= {})[v.serviceId] ??= {})[v.key] = Number(v.value);
   // Прошлый месяц: если «было» не внесено, берём «стало» прошлого месяца.
   const prevReads = tenIds.length ? await db.select().from(schema.readings)
     .where(and(inArray(schema.readings.tenantId, tenIds), eq(schema.readings.month, shiftMonth(month, -1)))) : [];
@@ -77,6 +83,7 @@ export async function loadMonthInput(accountId: string, month: string): Promise<
       month,
       services,
       bills: billMap,
+      values: valMap,
       readings: readMap,
       objects: objects.map((o) => ({
         id: o.id, name: o.short, owner: o.isOwner,

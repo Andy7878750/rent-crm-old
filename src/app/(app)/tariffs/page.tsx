@@ -51,7 +51,8 @@ export default async function TariffsPage({ searchParams }: PageProps<'/tariffs'
     t.who.forEach((id) => { const x = tenantObj.get(id); if (x) byObj.set(x.obj, [...(byObj.get(x.obj) ?? []), x.name]); });
     return [...byObj.entries()].map(([o, ns]) => `${o}: ${ns.join(', ')}`).join(' · ') || 'никто не выбран';
   };
-  const visible = services.filter((s) => filter === 'all' || s.kind === 'owner' ||
+  // Квитанции из строк настраиваются в окне квитанции объекта, тарифы у них не используются.
+  const visible = services.filter((s) => !s.config).filter((s) => filter === 'all' || s.kind === 'owner' ||
     s.tariffs.some((t) => t.who === 'all' || t.who.some((id) => tenantObj.get(id)?.objId === filter)));
 
   const chip = (id: string, label: string) => (

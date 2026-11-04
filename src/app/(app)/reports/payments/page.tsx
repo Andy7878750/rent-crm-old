@@ -33,12 +33,14 @@ export default async function PaymentsPage({ searchParams }: PageProps<'/reports
     const cells: PayCellData[] = suppliers.map((sup, ci) => {
       const svcs = input.services.filter((s) => s.supplier === sup && (!s.objectId || s.objectId === o.id));
       // Поставщик относится к объекту, если его тариф действует хотя бы для одного арендатора объекта (или «только арендодатель»).
-      const auto = svcs.some((s) => s.kind === 'owner' || o.tenants.some((t) => activeTariff(s, t.id, month)));
+      const auto = svcs.some((s) => !!s.config || s.kind === 'owner' || o.tenants.some((t) => activeTariff(s, t.id, month)));
       const manual = payCols[`${o.id}|${sup}`];
       const on = manual ?? auto;
       if (!on) return { objectId: o.id, supplier: sup, month, on: false, auto };
       // Связь со «Счетами на помещение»: услуга этого поставщика, где сумма вводится на объект.
-      const linked = svcs.find((s) => s.kind === 'owner' || o.tenants.some((t) => BILL_LOGICS.includes(activeTariff(s, t.id, month)?.logic ?? '')));
+      // У квитанции из строк — её главная сумма (billKey), если она есть.
+      const linked = svcs.find((s) => (s.config ? !!s.config.billKey
+        : s.kind === 'owner' || o.tenants.some((t) => BILL_LOGICS.includes(activeTariff(s, t.id, month)?.logic ?? ''))));
       const pay = pays.find((p) => p.objectId === o.id && p.supplier === sup);
       const amount = linked ? input.bills[o.id]?.[linked.id] : (pay?.amount != null ? Number(pay.amount) : undefined);
       if (amount !== undefined) { rowSum += amount; colSum[ci] += amount; total += amount; if (pay?.paidOn) paid += amount; }

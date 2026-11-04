@@ -97,6 +97,8 @@ export const services = pgTable('services', {
   name: text('name').notNull(),
   unit: text('unit').notNull(),
   kind: text('kind', { enum: ['common', 'indiv', 'owner'] }).notNull(),
+  /** Квитанция из строк (окно-конструктор): строки, кто платит, коэффициент. Пусто — считается по тарифам (старые квитанции). */
+  config: jsonb('config').$type<import('../lib/calc/types').ReceiptConfig>(),
   /** Порядок в счёте (стрелки ↑ ↓). */
   sort: integer('sort').notNull().default(0),
   createdAt: createdAt(),
@@ -151,7 +153,19 @@ export const objectBills = pgTable('object_bills', {
   amount: numeric('amount', { precision: 14, scale: 2 }).notNull(),
 }, (t) => [primaryKey({ columns: [t.objectId, t.serviceId, t.month] })]);
 
-/** Показание счётчика арендатора за месяц. zone: '' | 'day' | 'night'. */
+/**
+ * Месячные значения квитанции из строк, кроме главной суммы (она в object_bills) и показаний арендаторов (readings):
+ * объём или сумма строки (`L2:v`), тариф месяца (`:tp`), общий счётчик (`:camt`, `:cprev`, `:ccur`), количество и итог для остатка.
+ */
+export const receiptValues = pgTable('receipt_values', {
+  objectId: uuid('object_id').notNull().references(() => objects.id, { onDelete: 'cascade' }),
+  serviceId: uuid('service_id').notNull().references(() => services.id, { onDelete: 'cascade' }),
+  month: char('month', { length: 7 }).notNull(),
+  key: text('key').notNull(),
+  value: numeric('value', { precision: 14, scale: 4 }).notNull(),
+}, (t) => [primaryKey({ columns: [t.objectId, t.serviceId, t.month, t.key] })]);
+
+/** Показание счётчика арендатора за месяц. zone: '' | 'day' | 'night' | ключ строки квитанции (L2…). */
 export const readings = pgTable('readings', {
   tenantId: uuid('tenant_id').notNull().references(() => tenants.id, { onDelete: 'cascade' }),
   serviceId: uuid('service_id').notNull().references(() => services.id, { onDelete: 'cascade' }),

@@ -5,7 +5,8 @@ import { Building2, Check, CircleAlert, FileText, Plus } from 'lucide-react';
 import { db, schema } from '@/db';
 import { requireUser } from '@/lib/auth/session';
 import { listInvoices, listMeters, loadMonthInput, objectBillsOf } from '@/lib/data';
-import { activeTariff, calculateMonth } from '@/lib/calc/engine';
+import { activeTariff, calculateMonth, lineKey, receiptCalcOf } from '@/lib/calc/engine';
+import { monthFields } from '@/lib/calc/lines';
 import { fmtMoney, rubWords, sumMoney } from '@/lib/calc/format';
 import type { BillLine } from '@/lib/calc/types';
 import { defaultMonth, isMonth, monthLabel, shiftMonth } from '@/lib/month';
@@ -13,6 +14,7 @@ import { readRequisites } from '@/lib/requisites';
 import { METHODS, RESOURCES, category, type Method, type Resource } from '@/lib/receipts';
 import { MonthNav } from '@/components/month-nav';
 import { KindIcon } from '@/components/kind-icon';
+import { ReceiptFrame, type FrameData } from './receipt-frame';
 
 const pctTxt = (v: number) => String(v).replace('.', ',') + '%';
 
@@ -31,8 +33,19 @@ export default async function ObjectPage({ params, searchParams }: PageProps<'/o
   const res = calculateMonth(input);
   const q = `?m=${month}`;
 
-  // Квитанции объекта за месяц и их состояние.
+  // Квитанции объекта за месяц и их состояние. Квитанция из строк — рамка с вводом месяца; старая — строка со ссылкой на окно.
+  const objIn = input.objects.find((o) => o.id === obj.id)!;
   const receipts = input.services.filter((s) => s.objectId === obj.id || (!s.objectId && obj.tenants.some((t) => activeTariff(s, t.id, month)))).map((s) => {
+    const C = receiptCalcOf(input, objIn, s);
+    if (s.config && C) {
+      const cfg = s.config;
+      const frame: FrameData = {
+        id: s.id, name: s.name, supplier: s.supplier, cfg, C,
+        values: Object.fromEntries(monthFields(cfg).map((f) => [f.key, f.key === cfg.billKey ? input.bills[obj.id]?.[s.id] : input.values?.[obj.id]?.[s.id]?.[f.key]])),
+        readings: Object.fromEntries(obj.tenants.map((t) => [t.id, Object.fromEntries(cfg.lines.map((l) => [l.id, input.readings[t.id]?.[lineKey(s.id, l.id)]]))])),
+      };
+      return { s, frame, logic: 'share' as Method, M: METHODS.share, bill: undefined, active: true, noData: !C.ready, charged: 0, waited: false, shown: undefined };
+    }
     const tr = obj.tenants.map((t) => activeTariff(s, t.id, month)).find(Boolean) ?? null;
     const logic = (tr?.logic ?? 'share') as Method;
     const M = METHODS[logic] ?? METHODS.share;
@@ -41,7 +54,7 @@ export default async function ObjectPage({ params, searchParams }: PageProps<'/o
     const noData = lines.some((l) => l.amount === null) || (M.bill && bill === undefined);
     const charged = sumMoney(lines.filter((l) => l.amount !== null).map((l) => l.amount as number));
     return {
-      s, logic, M, bill, active: !!tr, noData, charged,
+      s, frame: null, logic, M, bill, active: !!tr, noData, charged,
       waited: M.bill && bill === undefined && prevBills[s.id] !== undefined,
       shown: M.bill ? bill : lines.length ? charged : undefined,
     };
@@ -69,7 +82,7 @@ export default async function ObjectPage({ params, searchParams }: PageProps<'/o
     receipts.length === 0
       ? { ok: false, text: 'Нет ни одной квитанции', href: `/objects/${obj.id}/receipt${q}`, act: 'Добавить' }
       : { ok: !missingReceipts.length, text: missingReceipts.length ? `Не внесено: ${missingReceipts.map((r) => r.s.name).join(', ')}` : 'Все квитанции внесены, суммы сходятся',
-        href: firstMissing ? `/objects/${obj.id}/receipt${q}&s=${firstMissing.s.id}` : undefined, act: 'Внести' },
+        href: firstMissing ? (firstMissing.frame ? `#r-${firstMissing.s.id}` : `/objects/${obj.id}/receipt${q}&s=${firstMissing.s.id}`) : undefined, act: 'Внести' },
     { ok: !noMail.length, text: noMail.length ? `Нет почты для счёта: ${noMail.map((t) => t.name).join(', ')}` : 'У всех арендаторов есть почта для счёта',
       href: `/objects/${obj.id}/edit`, act: 'Добавить' },
     { ok: !!(req.inn && (req.rs || req.sbp)), text: req.inn && (req.rs || req.sbp) ? 'Ваши реквизиты заполнены' : 'Заполните реквизиты: ИНН и куда платить', href: '/requisites', act: 'Заполнить' },
@@ -129,7 +142,7 @@ export default async function ObjectPage({ params, searchParams }: PageProps<'/o
         </section>
       )}
 
-      <div className="grid gap-4 xl:grid-cols-3">
+      <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(0,1.6fr)_minmax(0,1fr)]">
         {/* 1. Объект, арендаторы, счётчики */}
         <div className="flex flex-col gap-4">
           <section aria-label="Объект" className="card flex flex-col">
@@ -192,14 +205,17 @@ export default async function ObjectPage({ params, searchParams }: PageProps<'/o
                 Добавьте квитанции, которые приходят на объект: электричество, вода, УК… Для каждой один раз выбираете, как делить, — дальше каждый месяц только сумма и показания.
               </p>
             )}
+            {receipts.length > 0 && <p className="hint text-[13px]">Введите суммы и показания за месяц — расчёт справа посчитается сам</p>}
             {receipts.map((r) => {
+              if (r.frame) return <ReceiptFrame key={r.s.id} f={r.frame} objectId={obj.id} month={month} tenants={obj.tenants.map((t) => ({ id: t.id, name: obj.isOwner ? 'Вы (собственник)' : t.name }))} />;
               const c = category(r.s.category ?? '');
               return (
                 <Link key={r.s.id} id={`r-${r.s.id}`} href={`/objects/${obj.id}/receipt${q}&s=${r.s.id}`}
                   className={`flex items-center gap-3 rounded-[10px] border px-3 py-2.5 hover:border-cta ${r.noData ? 'border-dashed border-[#bcc5cf]' : 'border-line'}`}>
                   <span className={`flex size-8 flex-none items-center justify-center rounded-[8px] ${r.noData ? 'bg-[#eef1f4] text-faint' : 'bg-cta-soft text-cta-ink'}`}><KindIcon name={c.icon} size={16} /></span>
                   <span className="min-w-0 flex-1"><b className="block truncate font-semibold">{r.s.name}</b>
-                    <span className="hint block truncate">{r.s.supplier} · {r.M.label.toLowerCase()}</span></span>
+                    <span className="hint block truncate">{r.s.supplier} · {r.M.label.toLowerCase()}</span>
+                    <span className="block truncate text-[11px] text-cta-ink">заведена по-старому — откройте, чтобы разложить по строкам</span></span>
                   {r.noData ? (
                     <span className="flex flex-col items-end"><span className="text-[13px] font-semibold text-cta-ink">Внести</span>
                       <span className="text-[11px] text-muted">{r.waited ? 'была в прошлом месяце' : r.M.bill && r.bill === undefined ? 'нет суммы' : 'нет показаний'}</span></span>

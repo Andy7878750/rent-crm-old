@@ -6,6 +6,7 @@ import { and, eq, inArray, isNull } from 'drizzle-orm';
 import { db, schema } from '@/db';
 import { requireUser } from '@/lib/auth/session';
 import { readObjectTypes, writeObjectTypes } from '@/lib/data';
+import { monthFields } from '@/lib/calc/lines';
 import { isMonth } from '@/lib/month';
 
 const OWNER_NAME = 'Собственник';
@@ -139,13 +140,58 @@ export async function saveBill(objectId: string, serviceId: string, month: strin
   return { ok: true };
 }
 
+/** Квитанция из строк аккаунта на этом объекте (с настройкой). */
+async function ownReceipt(accountId: string, objectId: string, serviceId: string) {
+  if (!/^[0-9a-f-]{36}$/i.test(serviceId) || !/^[0-9a-f-]{36}$/i.test(objectId)) return null;
+  const [x] = await db.select({ config: schema.services.config }).from(schema.services)
+    .where(and(eq(schema.services.id, serviceId), eq(schema.services.accountId, accountId), eq(schema.services.objectId, objectId))).limit(1);
+  return x?.config ? x.config : null;
+}
+
+/** Месячное значение квитанции из строк (сумма, объём, тариф месяца, общий счётчик). Главная сумма — в счетах на помещение. */
+export async function saveReceiptValue(objectId: string, serviceId: string, month: string, key: string, value: string) {
+  const user = await requireUser();
+  const cfg = isMonth(month) ? await ownReceipt(user.accountId, objectId, serviceId) : null;
+  if (!cfg) return { ok: false };
+  if (!monthFields(cfg).some((f) => f.key === key)) return { ok: false };
+  if (key === cfg.billKey) return saveBill(objectId, serviceId, month, value);
+  const n = toNum(value);
+  const where = and(eq(schema.receiptValues.objectId, objectId), eq(schema.receiptValues.serviceId, serviceId),
+    eq(schema.receiptValues.month, month), eq(schema.receiptValues.key, key));
+  if (n === null) await db.delete(schema.receiptValues).where(where);
+  else await db.insert(schema.receiptValues).values({ objectId, serviceId, month, key, value: String(n) })
+    .onConflictDoUpdate({ target: [schema.receiptValues.objectId, schema.receiptValues.serviceId, schema.receiptValues.month, schema.receiptValues.key], set: { value: String(n) } });
+  revalidatePath(`/objects/${objectId}`);
+  return { ok: true };
+}
+
+/** Постоянное значение строки из рамки (✎): сумма или объём, тариф, норма; и коэффициент квитанции. */
+export async function saveReceiptConst(objectId: string, serviceId: string, lineId: string, field: 'qv' | 'tset' | 'k' | 'coef', value: string) {
+  const user = await requireUser();
+  const cfg = await ownReceipt(user.accountId, objectId, serviceId);
+  if (!cfg) return { ok: false };
+  const n = toNum(value);
+  if (field === 'coef') cfg.coef = n !== null && n > 0 ? n : 1;
+  else {
+    const l = cfg.lines.find((x) => x.id === lineId);
+    if (!l || (n !== null && n < 0)) return { ok: false };
+    const v = n ?? undefined;
+    if (field === 'qv') l.q.v = v;
+    if (field === 'tset') l.t.p = v;
+    if (field === 'k') l.q.k = v;
+  }
+  await db.update(schema.services).set({ config: cfg }).where(eq(schema.services.id, serviceId));
+  revalidatePath(`/objects/${objectId}`);
+  return { ok: true };
+}
+
 /** Показание: field = 'prev' | 'cur' | 'usage'. */
 export async function saveReading(tenantId: string, serviceId: string, zone: string, month: string, field: 'prev' | 'cur' | 'usage', value: string) {
   const user = await requireUser();
   const [t] = await db.select({ objectId: schema.tenants.objectId }).from(schema.tenants)
     .innerJoin(schema.objects, eq(schema.objects.id, schema.tenants.objectId))
     .where(and(eq(schema.tenants.id, tenantId), eq(schema.objects.accountId, user.accountId))).limit(1);
-  if (!t || !isMonth(month) || !(await ownService(user.accountId, serviceId)) || !['', 'day', 'night'].includes(zone) || !['prev', 'cur', 'usage'].includes(field)) return { ok: false };
+  if (!t || !isMonth(month) || !(await ownService(user.accountId, serviceId)) || !/^(|day|night|L\d{1,3})$/.test(zone) || !['prev', 'cur', 'usage'].includes(field)) return { ok: false };
   const n = toNum(value);
   const v = n === null ? null : String(n);
   await db.insert(schema.readings).values({ tenantId, serviceId, zone, month, [field]: v })
